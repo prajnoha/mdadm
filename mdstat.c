@@ -383,6 +383,20 @@ void mdstat_close(void)
 }
 
 /*
+ * mdstat_get_fd() - Get the descriptor held open by mdstat_read(hold).
+ *
+ * For callers that wait on several descriptors at once and cannot use
+ * mdstat_wait(). The descriptor reports POLLPRI when mdstat changed, and
+ * reading it through mdstat_read() re-arms that.
+ *
+ * Return: the descriptor, or -1 if none is held.
+ */
+int mdstat_get_fd(void)
+{
+	return mdstat_fd;
+}
+
+/*
  * function: mdstat_wait
  * Description: Function waits for event on mdstat.
  * Parameters:

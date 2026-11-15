@@ -35,6 +35,7 @@ struct mdstat_ent *mdstat_read(int hold, int start);
 
 void free_mdstat(struct mdstat_ent *ms);
 void mdstat_close(void);
+int mdstat_get_fd(void);
 
 void mdstat_wait_fd(int fd, const sigset_t *sigmask);
 int mdstat_wait(int seconds);
