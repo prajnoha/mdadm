@@ -32,7 +32,22 @@ void udev_detect(void);
 bool udev_is_available(void);
 
 #ifndef NO_LIBUDEV
+/**
+ * struct udev_md_events - what a single drain of the udev monitor saw.
+ * @total: events received.
+ * @non_remove: subset whose action is not "remove".
+ * @lost: the kernel dropped events, what was received is incomplete.
+ */
+struct udev_md_events {
+	int total;
+	int non_remove;
+	bool lost;
+};
+
 enum udev_status udev_wait_for_events(int seconds);
+enum udev_status udev_events_open(void);
+int udev_events_fd(void);
+int udev_events_drain(struct udev_md_events *ev);
 #endif
 
 enum udev_status udev_block(char *devnm);

@@ -168,6 +168,85 @@ enum udev_status udev_wait_for_events(int seconds)
 	}
 	return UDEV_STATUS_TIMEOUT;
 }
+
+/*
+ * udev_events_open() - Make sure the udev monitor is listening.
+ *
+ * Idempotent. Callers that wait on the monitor descriptor must open it before
+ * the first wait, otherwise events arriving earlier are lost.
+ *
+ * Return:
+ * UDEV_STATUS_SUCCESS when the monitor is listening
+ * UDEV_STATUS_ERROR_NO_UDEV when udev is not running, there is nothing to listen to
+ * UDEV_STATUS_ERROR on error
+ */
+enum udev_status udev_events_open(void)
+{
+	if (!udev_is_available())
+		return UDEV_STATUS_ERROR_NO_UDEV;
+
+	if (udev && udev_monitor)
+		return UDEV_STATUS_SUCCESS;
+
+	return udev_initialize();
+}
+
+/*
+ * udev_events_fd() - Descriptor of the udev monitor socket.
+ *
+ * Return: the descriptor, or -1 if the monitor is not open.
+ */
+int udev_events_fd(void)
+{
+	if (!udev_monitor)
+		return -1;
+
+	return udev_monitor_get_fd(udev_monitor);
+}
+
+/*
+ * udev_events_drain() - Read all queued events without blocking.
+ * @ev: tallies of what was read.
+ *
+ * Receiving is cheap compared to acting on an event, so the whole queue is
+ * consumed in one go and a burst collapses into a single decision. Only counts
+ * are reported, the caller decides what deserves a reaction.
+ *
+ * Return: 0 when the monitor is open, -1 when it is not.
+ */
+int udev_events_drain(struct udev_md_events *ev)
+{
+	struct udev_device *dev;
+
+	memset(ev, 0, sizeof(*ev));
+
+	if (!udev_monitor)
+		return -1;
+
+	for (;;) {
+		const char *action;
+
+		errno = 0;
+		dev = udev_monitor_receive_device(udev_monitor);
+		if (!dev)
+			break;
+
+		action = udev_device_get_action(dev);
+		ev->total++;
+		if (!action || strcmp(action, "remove") != 0)
+			ev->non_remove++;
+
+		udev_device_unref(dev);
+	}
+
+	/* EAGAIN is the queue running dry, anything else means we may have
+	 * missed an event and must not assume there was nothing to see.
+	 */
+	if (errno != 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+		ev->lost = true;
+
+	return 0;
+}
 #endif
 
 /*
