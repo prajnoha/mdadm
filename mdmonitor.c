@@ -1311,6 +1311,9 @@ static void try_spare_migration(struct state *statelist)
 				continue;
 			for (from=statelist ; from ; from=from->next) {
 				dev_t devid;
+				int lockfd;
+				bool moved;
+
 				if (!check_donor(from, to))
 					continue;
 				if (from->metadata->ss->external)
@@ -1319,9 +1322,23 @@ static void try_spare_migration(struct state *statelist)
 				else
 					devid = choose_spare(from, to, domlist,
 							     &sc);
-				if (devid > 0 &&
-				    move_spare(from->devname, to->devname,
-					       devid)) {
+				if (devid <= 0)
+					continue;
+
+				/* udev may be running incremental assembly on
+				 * this disk right now. Moving it in the middle
+				 * of that leaves both sides acting on a
+				 * membership the other has already changed.
+				 */
+				lockfd = udev_disk_lock(devid);
+				if (!is_fd_valid(lockfd))
+					continue;
+
+				moved = move_spare(from->devname, to->devname,
+						   devid);
+				close_fd(&lockfd);
+
+				if (moved) {
 					alert(EVENT_MOVE_SPARE, NULL, 0, to->devname, from->devname);
 					break;
 				}
