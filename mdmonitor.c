@@ -29,6 +29,7 @@
 
 #include	<sys/wait.h>
 #include	<limits.h>
+#include	<poll.h>
 #include	<syslog.h>
 
 #define TASK_COMM_LEN 16
@@ -129,8 +130,12 @@ static int check_one_sharer(int scan);
 static void link_containers_with_subarrays(struct state *list);
 static int make_daemon(char *pidfile);
 static void try_spare_migration(struct state *statelist);
-static void wait_for_events(int *delay_for_event, int c_delay);
-static void wait_for_events_mdstat(int *delay_for_event, int c_delay);
+enum wait_result {
+	WAIT_TIMEOUT,
+	WAIT_EVENT
+};
+
+static enum wait_result wait_for_events(int seconds);
 static int write_autorebuild_pid(void);
 
 int Monitor(struct mddev_dev *devlist,
@@ -297,6 +302,17 @@ int Monitor(struct mddev_dev *devlist,
 		}
 	}
 
+#ifndef NO_LIBUDEV
+	/* Start listening before the first scan. Opening the monitor only once
+	 * the first wait is reached would drop everything that happened while
+	 * that scan was running.
+	 */
+	if (!oneshot) {
+		udev_detect();
+		udev_events_open();
+	}
+#endif
+
 	while (!finished) {
 		int new_found = 0;
 		struct state *st, **stp;
@@ -337,7 +353,16 @@ int Monitor(struct mddev_dev *devlist,
 				break;
 			}
 
-			wait_for_events(&delay_for_event, c->delay);
+			/* After an event poll again soon, it gives a new device
+			 * a chance to be processed. Back off once things go
+			 * quiet. Both sources are treated the same way.
+			 */
+			if (wait_for_events(delay_for_event) == WAIT_EVENT) {
+				if (c->delay > FALLBACK_DELAY)
+					delay_for_event = FALLBACK_DELAY;
+			} else {
+				delay_for_event = c->delay;
+			}
 		}
 		info.test = 0;
 
@@ -362,52 +387,96 @@ int Monitor(struct mddev_dev *devlist,
 
 /*
  * wait_for_events() - Waits for events on md devices.
- * @delay_for_event: pointer to current event delay
- * @c_delay: delay from config
+ * @seconds: how long to wait at most
+ *
+ * Waits on mdstat and, where udev is running, on the udev monitor as well.
+ * mdstat is the primary source, every md state change Monitor reports on wakes
+ * it. udev contributes the one case mdstat does not cover: md_new_event() is
+ * sent from md_run(), while do_md_run() keeps the array unreadable for a short
+ * while afterwards and sends no second mdstat wakeup once it is done. The
+ * post-rule udev event is what tells us to look again.
+ *
+ * Return:
+ * WAIT_EVENT when one of the sources reported something
+ * WAIT_TIMEOUT otherwise
  */
-static void wait_for_events(int *delay_for_event, int c_delay)
+static enum wait_result wait_for_events(int seconds)
 {
+	struct timespec deadline;
+
 #ifndef NO_LIBUDEV
-	/* Monitor is long running, re-check on every pass. */
+	/* Monitor is long running, udev may come and go. */
 	udev_detect();
-
-	switch (udev_wait_for_events(*delay_for_event)) {
-	case UDEV_STATUS_ERROR_NO_UDEV:
-		break;
-	case UDEV_STATUS_ERROR:
-		pr_err("Error while waiting for udev events.\n");
-		return;
-	default:
-		return;
-	}
+	udev_events_open();
 #endif
-	wait_for_events_mdstat(delay_for_event, c_delay);
-}
 
-/*
- * wait_for_events_mdstat() - Waits for events on mdstat.
- * @delay_for_event: pointer to current event delay
- * @c_delay: delay from config
- */
-static void wait_for_events_mdstat(int *delay_for_event, int c_delay)
-{
-	int wait_result = mdstat_wait(*delay_for_event);
+	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += seconds;
 
-	if (wait_result < 0) {
-		pr_err("Error while waiting for events on mdstat.\n");
-		return;
+	for (;;) {
+		struct pollfd pfd[2];
+		int mdstat_slot = -1;
+#ifndef NO_LIBUDEV
+		int udev_slot = -1;
+#endif
+		nfds_t nfds = 0;
+		struct timespec now;
+		int timeout, fd, ret;
+
+		fd = mdstat_get_fd();
+		if (fd >= 0) {
+			pfd[nfds].fd = fd;
+			/* mdstat reports a change through POLLPRI, it is always
+			 * readable so POLLIN would return immediately.
+			 */
+			pfd[nfds].events = POLLPRI;
+			mdstat_slot = nfds++;
+		}
+#ifndef NO_LIBUDEV
+		fd = udev_events_fd();
+		if (fd >= 0) {
+			pfd[nfds].fd = fd;
+			pfd[nfds].events = POLLIN;
+			udev_slot = nfds++;
+		}
+#endif
+
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		timeout = (deadline.tv_sec - now.tv_sec) * 1000 +
+			  (deadline.tv_nsec - now.tv_nsec) / 1000000;
+		if (timeout <= 0)
+			return WAIT_TIMEOUT;
+
+		/* With no source to wait on this is just a sleep. */
+		ret = poll(pfd, nfds, timeout);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			pr_err("Error while waiting for events: %s.\n",
+			       strerror(errno));
+			/* Sleep the rest off rather than spin on it. */
+			poll(NULL, 0, timeout);
+			return WAIT_TIMEOUT;
+		}
+		if (ret == 0)
+			return WAIT_TIMEOUT;
+
+		if (mdstat_slot >= 0 &&
+		    (pfd[mdstat_slot].revents & (POLLPRI | POLLERR)))
+			return WAIT_EVENT;
+
+#ifndef NO_LIBUDEV
+		if (udev_slot >= 0 && pfd[udev_slot].revents) {
+			struct udev_md_events ev;
+
+			/* Consume the whole queue, so a burst costs one wakeup
+			 * rather than one per event.
+			 */
+			udev_events_drain(&ev);
+			return WAIT_EVENT;
+		}
+#endif
 	}
-
-	/*
-	 * Give chance to process new device
-	 */
-	if (wait_result != 0) {
-		if (c_delay > FALLBACK_DELAY)
-			*delay_for_event = FALLBACK_DELAY;
-	} else {
-		*delay_for_event = c_delay;
-	}
-	mdstat_close();
 }
 
 static int make_daemon(char *pidfile)

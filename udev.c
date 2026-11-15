@@ -118,58 +118,6 @@ static enum udev_status udev_initialize(void)
 }
 
 /*
- * udev_wait_for_events() - Waits for events from udev.
- * @seconds: Timeout in seconds.
- *
- * Function waits udev events, wakes up on event or timeout.
- *
- * Return:
- * UDEV_STATUS_SUCCESS on detected event
- * UDEV_STATUS_TIMEOUT on timeout
- * UDEV_STATUS_ERROR on error
- * UDEV_STATUS_ERROR_NO_UDEV when udev is not running, there are no events to wait for
- */
-enum udev_status udev_wait_for_events(int seconds)
-{
-	int fd;
-	fd_set readfds;
-	struct timeval tv;
-	int ret;
-
-	if (!udev_is_available())
-		return UDEV_STATUS_ERROR_NO_UDEV;
-
-	if (!udev || !udev_monitor) {
-		ret = udev_initialize();
-		if (ret != UDEV_STATUS_SUCCESS)
-			return ret;
-	}
-
-	fd = udev_monitor_get_fd(udev_monitor);
-	if (fd < 0) {
-		pr_err("Cannot access file descriptor associated with udev monitor.\n");
-		return UDEV_STATUS_ERROR;
-	}
-
-	FD_ZERO(&readfds);
-	FD_SET(fd, &readfds);
-	tv.tv_sec = seconds;
-	tv.tv_usec = 0;
-
-	if (select(fd + 1, &readfds, NULL, NULL, &tv) > 0 && FD_ISSET(fd, &readfds)) {
-		struct udev_device *dev = udev_monitor_receive_device(udev_monitor);
-
-		if (dev) {
-			udev_device_unref(dev);
-			return UDEV_STATUS_SUCCESS; /* event detected */
-		} else {
-			return UDEV_STATUS_ERROR;
-		}
-	}
-	return UDEV_STATUS_TIMEOUT;
-}
-
-/*
  * udev_events_open() - Make sure the udev monitor is listening.
  *
  * Idempotent. Callers that wait on the monitor descriptor must open it before

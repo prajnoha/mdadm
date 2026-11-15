@@ -44,7 +44,6 @@ struct udev_md_events {
 	bool lost;
 };
 
-enum udev_status udev_wait_for_events(int seconds);
 enum udev_status udev_events_open(void);
 int udev_events_fd(void);
 int udev_events_drain(struct udev_md_events *ev);
