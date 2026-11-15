@@ -1651,6 +1651,7 @@ extern void print_r10_layout(int layout);
 
 extern void put_md_name(char *name);
 extern char *devid2kname(dev_t devid);
+extern dev_t devid2whole_disk(dev_t devid);
 extern char *devid2devnm(dev_t devid);
 extern dev_t devnm2devid(char *devnm);
 extern char *get_md_name(char *devnm);

@@ -130,6 +130,43 @@ char *devid2kname(dev_t devid)
 	return NULL;
 }
 
+/*
+ * devid2whole_disk() - Find the disk a device belongs to.
+ * @devid: device to look up
+ *
+ * For a partition this is the disk holding it, for anything else it is the
+ * device itself. Conventions that work on whole disks, such as the block
+ * device locking udev honours, need the disk rather than the partition.
+ *
+ * Return: the disk, or 0 if it could not be determined.
+ */
+dev_t devid2whole_disk(dev_t devid)
+{
+	char path[60];
+	char buf[20];
+	int major_num, minor_num;
+	struct stat stb;
+
+	snprintf(path, sizeof(path), "/sys/dev/block/%d:%d/partition",
+		 major(devid), minor(devid));
+	if (stat(path, &stb) != 0)
+		/* Not a partition, so already a whole disk. */
+		return devid;
+
+	/* The /sys/dev/block link points at the partition inside the disk
+	 * directory, so the parent of it describes the disk.
+	 */
+	snprintf(path, sizeof(path), "/sys/dev/block/%d:%d/../dev",
+		 major(devid), minor(devid));
+	if (load_sys(path, buf, sizeof(buf)) != 0)
+		return 0;
+
+	if (sscanf(buf, "%d:%d", &major_num, &minor_num) != 2)
+		return 0;
+
+	return makedev(major_num, minor_num);
+}
+
 char *stat2kname(struct stat *st)
 {
 	if ((S_IFMT & st->st_mode) != S_IFBLK)
