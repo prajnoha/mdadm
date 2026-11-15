@@ -49,6 +49,7 @@ int udev_events_fd(void);
 int udev_events_drain(struct udev_md_events *ev);
 #endif
 
+int udev_disk_lock(dev_t devid);
 enum udev_status udev_block(char *devnm);
 bool udev_unblock(void);
 void udev_ready(struct mdinfo *sra);

@@ -22,6 +22,7 @@
 #include	"udev.h"
 #include	"xmalloc.h"
 
+#include	<sys/file.h>
 #include	<sys/wait.h>
 #include	<signal.h>
 #include	<limits.h>
@@ -204,6 +205,53 @@ int udev_events_drain(struct udev_md_events *ev)
 	return 0;
 }
 #endif
+
+/*
+ * udev_disk_lock() - Take the block device lock udev honours.
+ * @devid: device to lock, a partition locks the disk holding it
+ *
+ * udev takes a shared lock on the whole disk before it runs rules for a block
+ * device, so an exclusive lock both keeps udev away while we work and tells
+ * us when udev got there first. See https://systemd.io/BLOCK_DEVICE_LOCKING.
+ *
+ * Events for a locked disk are held, not dropped, but only for a few minutes,
+ * so the lock is meant to be taken for the length of one operation and no
+ * longer. Never take it from code a udev rule runs, that already sits inside
+ * the shared lock of its own worker and would only block against itself.
+ *
+ * The device is opened read only on purpose. Closing a block device that was
+ * opened for writing makes udev issue a change event, which is the opposite
+ * of what a lock holder wants.
+ *
+ * Return: descriptor holding the lock, closing it releases. -1 when the disk
+ * is busy or could not be opened.
+ */
+int udev_disk_lock(dev_t devid)
+{
+	dev_t disk = devid2whole_disk(devid);
+	char path[PATH_MAX];
+	char *kname;
+	int fd;
+
+	if (!disk)
+		return -1;
+
+	kname = devid2kname(disk);
+	if (!kname)
+		return -1;
+
+	snprintf(path, sizeof(path), "/dev/%s", kname);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (!is_fd_valid(fd))
+		return -1;
+
+	if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
 
 /*
  * udev_block() - Block udev from examining newly created arrays.
