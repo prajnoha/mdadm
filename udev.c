@@ -82,7 +82,10 @@ static void udev_release(void)
 /*
  * udev_initialize() - Initializes udev and udev_monitor structures.
  *
- * Function initializes udev, udev_monitor, and sets udev_monitor filter for block devices.
+ * Function initializes udev, udev_monitor, and sets udev_monitor filter for md devices.
+ *
+ * The subsystem and tag filters are combined with AND and are evaluated in the
+ * kernel, so block devices without the tag never reach us at all.
  *
  * Return:
  * UDEV_STATUS_SUCCESS on success
@@ -105,6 +108,11 @@ static enum udev_status udev_initialize(void)
 
 	if (udev_monitor_filter_add_match_subsystem_devtype(udev_monitor, "block", 0) < 0) {
 		pr_err("Cannot add udev monitor event filter for md devices.\n");
+		udev_release();
+		return UDEV_STATUS_ERROR;
+	}
+	if (udev_monitor_filter_add_match_tag(udev_monitor, "mdadm") < 0) {
+		pr_err("Cannot add udev monitor tag filter for md devices.\n");
 		udev_release();
 		return UDEV_STATUS_ERROR;
 	}

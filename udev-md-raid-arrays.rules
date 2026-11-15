@@ -2,6 +2,11 @@
 
 SUBSYSTEM!="block", GOTO="md_end"
 
+# Mark md arrays so that "mdadm --monitor" can filter events on the tag.
+# Must stay ahead of every GOTO below, the tag has to be applied whatever
+# the action is and whatever state the array is in, inactive included.
+KERNEL=="md*", ENV{DEVTYPE}!="partition", TAG+="mdadm"
+
 # handle md arrays
 ACTION=="remove", GOTO="md_end"
 KERNEL!="md*", GOTO="md_end"
