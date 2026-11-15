@@ -36,6 +36,8 @@
 #define EVENT_NAME_MAX 32
 #define AUTOREBUILD_PID_PATH MDMON_DIR "/autorebuild.pid"
 #define FALLBACK_DELAY 5
+/* Passes an unreadable array stays worth re-checking on a udev event for. */
+#define MAX_RESOLVE_PASSES 3
 
 /**
  * struct state - external array or container properties.
@@ -135,7 +137,8 @@ enum wait_result {
 	WAIT_EVENT
 };
 
-static enum wait_result wait_for_events(int seconds);
+static enum wait_result wait_for_events(int seconds, bool resolving);
+static bool arrays_resolving(struct state *statelist);
 static int write_autorebuild_pid(void);
 
 int Monitor(struct mddev_dev *devlist,
@@ -357,7 +360,9 @@ int Monitor(struct mddev_dev *devlist,
 			 * a chance to be processed. Back off once things go
 			 * quiet. Both sources are treated the same way.
 			 */
-			if (wait_for_events(delay_for_event) == WAIT_EVENT) {
+			if (wait_for_events(delay_for_event,
+					    arrays_resolving(statelist)) ==
+			    WAIT_EVENT) {
 				if (c->delay > FALLBACK_DELAY)
 					delay_for_event = FALLBACK_DELAY;
 			} else {
@@ -386,8 +391,35 @@ int Monitor(struct mddev_dev *devlist,
 }
 
 /*
+ * arrays_resolving() - Is some array in a state a re-scan could clear?
+ * @statelist: arrays Monitor tracks
+ *
+ * st->err is non zero when the last pass failed to read the array. That is
+ * exactly the window where md_run() has already woken mdstat but do_md_run()
+ * has not finished yet, which is the one thing a udev event tells us and
+ * mdstat does not.
+ *
+ * Give up after a few passes. An array that stays unreadable will not be fixed
+ * by the next udev event, and should not keep making every event look
+ * interesting. The periodic poll covers it from there.
+ *
+ * Return: true when a udev event could be worth acting on.
+ */
+static bool arrays_resolving(struct state *statelist)
+{
+	struct state *st;
+
+	for (st = statelist; st; st = st->next)
+		if (st->err > 0 && st->err <= MAX_RESOLVE_PASSES)
+			return true;
+
+	return false;
+}
+
+/*
  * wait_for_events() - Waits for events on md devices.
  * @seconds: how long to wait at most
+ * @resolving: whether a udev event could tell us anything new
  *
  * Waits on mdstat and, where udev is running, on the udev monitor as well.
  * mdstat is the primary source, every md state change Monitor reports on wakes
@@ -400,7 +432,7 @@ int Monitor(struct mddev_dev *devlist,
  * WAIT_EVENT when one of the sources reported something
  * WAIT_TIMEOUT otherwise
  */
-static enum wait_result wait_for_events(int seconds)
+static enum wait_result wait_for_events(int seconds, bool resolving)
 {
 	struct timespec deadline;
 
@@ -469,11 +501,28 @@ static enum wait_result wait_for_events(int seconds)
 		if (udev_slot >= 0 && pfd[udev_slot].revents) {
 			struct udev_md_events ev;
 
+			if (pfd[udev_slot].revents & ~POLLIN)
+				/* Socket trouble. Do not assume there was
+				 * nothing to see.
+				 */
+				return WAIT_EVENT;
+
 			/* Consume the whole queue, so a burst costs one wakeup
 			 * rather than one per event.
 			 */
-			udev_events_drain(&ev);
-			return WAIT_EVENT;
+			if (udev_events_drain(&ev) < 0 || ev.lost)
+				return WAIT_EVENT;
+
+			/* Everything else md reports wakes mdstat too, so
+			 * unless an array is mid-start there is nothing here
+			 * we have not already seen. Removals never are: the
+			 * array is gone and do_md_stop() woke mdstat with the
+			 * final state.
+			 */
+			if (resolving && ev.non_remove)
+				return WAIT_EVENT;
+
+			continue;
 		}
 #endif
 	}
